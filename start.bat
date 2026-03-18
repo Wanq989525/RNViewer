@@ -69,6 +69,6 @@ echo.
 echo [Start] Starting RNViewer...
 echo [URL] http://localhost:%PORT%
 echo.
-python -m streamlit run Rnv.py --server.headless true --server.port %PORT%
+python -W ignore -m streamlit run Rnv.py --server.headless true --server.port %PORT%
 
 pause

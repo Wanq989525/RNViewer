@@ -17,6 +17,7 @@ RNViewer - Web UI
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import sys
 import os
 import re
@@ -51,12 +52,22 @@ def get_reminds_img_path() -> Path:
     return Path(os.environ.get('APPDATA', '')) / 'reminds' / 'statics' / 'img'
 
 
-def convert_reminds_images(md_content: str) -> str:
-    """将 reminds://img/ 协议图片转换为 base64 data URL"""
+@st.cache_data(show_spinner=False)
+def _convert_reminds_images_cached(md_content: str, img_path_str: str, _cache_version: str = "v2") -> str:
+    """
+    缓存的图片转换函数（内部实现）
+
+    Args:
+        md_content: Markdown 内容
+        img_path_str: 图片目录路径字符串
+
+    Returns:
+        转换后的内容
+    """
     if not md_content:
         return md_content
 
-    reminds_img_path = get_reminds_img_path()
+    reminds_img_path = Path(img_path_str)
 
     def replace_image(match):
         full_match = match.group(0)
@@ -64,10 +75,14 @@ def convert_reminds_images(md_content: str) -> str:
         img_url = match.group(2)
         title = match.group(3) if match.lastindex >= 3 else ''
 
-        # 检查是否是 reminds://img/ 协议
+        # 检查是否是 reminds://img/ 或 提醒://img/ 协议
+        relative_path = None
         if img_url.startswith('reminds://img/'):
-            # 提取相对路径: reminds://img/1/2025/11/19/xxx.jpg -> 1/2025/11/19/xxx.jpg
             relative_path = img_url.replace('reminds://img/', '')
+        elif img_url.startswith('提醒://img/'):
+            relative_path = img_url.replace('提醒://img/', '')
+
+        if relative_path:
             local_path = reminds_img_path / relative_path
 
             if local_path.exists():
@@ -106,6 +121,15 @@ def convert_reminds_images(md_content: str) -> str:
     # 匹配 markdown 图片语法: ![alt](url "title") 或 ![alt](url)
     pattern = r'!\[([^\]]*)\]\(([^)]+?)(?:\s+"([^"]+)")?\)'
     return re.sub(pattern, replace_image, md_content)
+
+
+def convert_reminds_images(md_content: str) -> str:
+    """将 reminds://img/ 协议图片转换为 base64 data URL（带缓存）"""
+    if not md_content:
+        return md_content
+
+    reminds_img_path = get_reminds_img_path()
+    return _convert_reminds_images_cached(md_content, str(reminds_img_path))
 
 
 def extract_internal_links(md_content: str) -> list:
@@ -160,7 +184,9 @@ def convert_internal_links_for_st(md_content: str, current_memo_id: int = None) 
         else:
             return f'[{link_text}](?goto_uuid={uuid})'
 
-    pattern = r'\[([^\]]+)\]\(/memo/([a-f0-9-]+)(?:\s+"[^"]+")?\)'
+    # 更宽松的正则：匹配各种可能的链接格式
+    # 支持：[文字](/memo/uuid) 或 [文字](/memo/uuid "标题") 或 [文字](/memo/uuid '标题')
+    pattern = r'\[([^\]]+)\]\(/memo/([a-f0-9-]+)(?:\s+["\'][^"\']*["\'])?\s*\)'
     return re.sub(pattern, replace_link, md_content)
 
 
@@ -576,6 +602,27 @@ def validate_llm_config(config: dict) -> tuple:
     return True, None
 
 
+def build_llm_url(base_url: str) -> str:
+    """
+    构建 LLM API 的完整 URL
+
+    Args:
+        base_url: 基础 URL
+
+    Returns:
+        完整的 chat/completions 端点 URL
+    """
+    url = base_url.rstrip('/')
+    if not url.endswith('/chat/completions'):
+        if url.endswith('/v1'):
+            url = f"{url}/chat/completions"
+        elif '/v1/' not in url:
+            url = f"{url}/v1/chat/completions"
+        else:
+            url = f"{url}/chat/completions"
+    return url
+
+
 def call_llm_api(prompt: str, config: dict) -> tuple:
     """
     调用大模型 API
@@ -595,15 +642,7 @@ def call_llm_api(prompt: str, config: dict) -> tuple:
     model_name = llm_config.get('model_name', 'gpt-4o-mini')
 
     # 构建 API 端点
-    if not base_url.endswith('/chat/completions'):
-        if base_url.endswith('/v1'):
-            url = f"{base_url}/chat/completions"
-        elif '/v1/' not in base_url:
-            url = f"{base_url}/v1/chat/completions"
-        else:
-            url = f"{base_url}/chat/completions"
-    else:
-        url = base_url
+    url = build_llm_url(base_url)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -839,14 +878,6 @@ def render_stats():
         </div>
         """, unsafe_allow_html=True)
 
-    # 热门标签
-    st.markdown("### 🔥 热门标签")
-    tags_html = ""
-    for name, count in info['top_tags'][:10]:
-        tags_html += f'<span class="tag-badge" onclick="selectTag(\'{name}\')">{name} ({count})</span>'
-
-    st.markdown(f'<div style="margin-top: 1rem;">{tags_html}</div>', unsafe_allow_html=True)
-
 
 def render_search():
     """渲染搜索区域"""
@@ -949,20 +980,28 @@ def render_tags_list():
 def render_memo_list(memos: list):
     """渲染笔记列表"""
     for memo in memos:
-        # 创建可点击的卡片
-        with st.container():
+        # 使用 container 创建卡片效果
+        with st.container(border=True):
             col1, col2 = st.columns([4, 1])
 
             with col1:
-                # 标题和预览
+                # 标题
                 title = memo.title or "无标题"
-                preview = memo.md_content[:150] if memo.md_content else ""
+                st.markdown(f"**{title}**")
 
-                # 卡片容器
-                st.markdown('<div class="note-card">', unsafe_allow_html=True)
-                st.subheader(title)
-                st.caption(f"{preview}{'...' if len(preview) >= 150 else ''}")
-                st.markdown('</div>', unsafe_allow_html=True)
+                # 预览内容
+                if memo.md_content:
+                    preview = memo.md_content[:150]
+
+                    # 将图片链接替换为"……"
+                    preview = re.sub(r'!\[[^\]]*\]\([^)]+\)', '……', preview)
+
+                    # 转换内部链接为可点击的查询参数格式
+                    preview = convert_internal_links_for_st(preview, memo.id)
+                    # 直接渲染 markdown
+                    st.markdown(preview)
+                    if len(memo.md_content) > 150:
+                        st.markdown("...")
 
             with col2:
                 if st.button("查看", key=f"view_{memo.id}", use_container_width=True):
@@ -970,8 +1009,6 @@ def render_memo_list(memos: list):
                     st.session_state.current_view = 'detail'
                     st.session_state.selected_memo_id = memo.id
                     st.rerun()
-
-            st.markdown("---")
 
 
 def sanitize_filename(name: str) -> str:
@@ -1028,7 +1065,7 @@ def render_memo_detail():
         # 将内部链接转换为带有查询参数的链接，传入当前笔记ID
         converted_content = convert_internal_links_for_st(converted_content, memo.id)
 
-        # 使用 st.markdown 直接渲染（链接可正常点击）
+        # 使用 st.markdown 直接渲染
         st.markdown(converted_content, unsafe_allow_html=True)
     else:
         st.info("此笔记暂无内容")
@@ -1112,6 +1149,36 @@ def render_memo_detail():
             st.rerun()
 
 
+def export_memos_to_md(memos: list, title: str, export_path: Path) -> int:
+    """
+    导出笔记列表到 Markdown 文件
+
+    Args:
+        memos: 笔记列表
+        title: 文档标题
+        export_path: 输出文件路径
+
+    Returns:
+        导出的笔记数量
+    """
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(export_path, 'w', encoding='utf-8') as f:
+        f.write(f"# {title} 笔记汇总\n\n")
+        f.write(f"> 导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"> 笔记数量：{len(memos)}\n\n")
+        f.write("---\n\n")
+
+        for memo in memos:
+            f.write(f"## {memo.title or '无标题'}\n\n")
+            if memo.md_content:
+                processed_content = process_export_images(memo.md_content, export_path)
+                f.write(processed_content)
+            f.write("\n\n---\n\n")
+
+    return len(memos)
+
+
 def render_tag_view():
     """渲染标签视图"""
     tag_name = st.session_state.selected_tag
@@ -1155,23 +1222,8 @@ def render_tag_view():
     if st.button(f"💾 导出 '{export_label}' 下的所有笔记"):
         safe_name = sanitize_filename(export_label)
         export_path = Path(st.session_state.config.get('export_path', 'docs')) / f"{safe_name}_notes.md"
-        export_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(export_path, 'w', encoding='utf-8') as f:
-            f.write(f"# {export_label} 笔记汇总\n\n")
-            f.write(f"> 导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"> 笔记数量：{len(memos)}\n\n")
-            f.write("---\n\n")
-
-            for memo in memos:
-                f.write(f"## {memo.title or '无标题'}\n\n")
-                if memo.md_content:
-                    # 处理图片
-                    processed_content = process_export_images(memo.md_content, export_path)
-                    f.write(processed_content)
-                f.write("\n\n---\n\n")
-
-        st.success(f"已导出 {len(memos)} 条笔记到: {export_path}")
+        count = export_memos_to_md(memos, export_label, export_path)
+        st.success(f"已导出 {count} 条笔记到: {export_path}")
 
 
 def render_export_page():
@@ -1211,24 +1263,10 @@ def render_export_page():
             if not safe_output_name.endswith('.md'):
                 safe_output_name += '.md'
             export_path = Path(st.session_state.config.get('export_path', 'docs')) / safe_output_name
-            export_path.parent.mkdir(parents=True, exist_ok=True)
 
             memos = load_memos_by_tag(selected_tag)
-
-            with open(export_path, 'w', encoding='utf-8') as f:
-                f.write(f"# {selected_tag} 笔记汇总\n\n")
-                f.write(f"> 导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"> 笔记数量：{len(memos)}\n\n")
-                f.write("---\n\n")
-
-                for memo in memos:
-                    f.write(f"## {memo.title or '无标题'}\n\n")
-                    if memo.md_content:
-                        processed_content = process_export_images(memo.md_content, export_path)
-                        f.write(processed_content)
-                    f.write("\n\n---\n\n")
-
-            st.success(f"已导出 {len(memos)} 条笔记到: {export_path}")
+            count = export_memos_to_md(memos, selected_tag, export_path)
+            st.success(f"已导出 {count} 条笔记到: {export_path}")
         else:
             st.warning("请先选择一个标签")
 
@@ -1528,15 +1566,7 @@ def render_settings_page():
                         }
 
                         # 构建 chat completions 端点
-                        # 处理不同的 URL 格式
-                        url = base_url.rstrip('/')
-                        if not url.endswith('/chat/completions'):
-                            if url.endswith('/v1'):
-                                url = f"{url}/chat/completions"
-                            elif '/v1/' not in url:
-                                url = f"{url}/v1/chat/completions"
-                            else:
-                                url = f"{url}/chat/completions"
+                        url = build_llm_url(base_url)
 
                         # 发送简单测试请求
                         test_payload = {
@@ -1636,7 +1666,7 @@ def render_settings_page():
             try:
                 md_files = list(export_dir.glob("*.md"))
                 st.caption(f"已导出文件: {len(md_files)} 个 Markdown 文件")
-            except:
+            except Exception:
                 pass
         else:
             st.warning(f"⚠️ 目录不存在，将在导出时自动创建")
@@ -1687,42 +1717,70 @@ def render_settings_page():
 
 # ============== 主应用 ==============
 def check_url_navigation():
-    """检测URL参数，处理内部链接跳转"""
+    """检测URL参数或路径，处理内部链接跳转"""
+    uuid = None
+    from_memo_id = None
+
+    # 方式1：检查查询参数 ?goto_uuid=xxx
     params = st.query_params
     if 'goto_uuid' in params:
         uuid = params['goto_uuid']
+        from_memo_id = params.get('from_memo')
+
+    # 方式2：检查路径 /memo/uuid（通过 JavaScript 获取）
+    # 由于 Streamlit 不直接暴露路径，我们使用 components.html 来处理
+
+    if uuid:
         memo = get_memo_by_uuid(uuid, get_db_path())
         if memo:
-            # 从URL参数获取来源笔记ID（优先使用URL参数，因为它更可靠）
-            from_memo_id = params.get('from_memo')
+            # 只有当前不在笔记详情页时才保存来源视图
+            if st.session_state.current_view != 'detail':
+                save_source_view()
+
+            # 处理来源笔记ID
             if from_memo_id:
                 try:
                     from_memo_id = int(from_memo_id)
-                    # 将来源笔记加入历史栈
                     st.session_state.memo_history.append(from_memo_id)
                 except (ValueError, TypeError):
                     pass
             else:
-                # 如果URL没有from_memo参数，尝试从session_state获取
                 current_memo_id = st.session_state.selected_memo_id
                 if current_memo_id:
                     st.session_state.memo_history.append(current_memo_id)
 
-            # 如果当前不在笔记详情页，保存来源视图
-            if st.session_state.current_view != 'detail':
-                save_source_view()
-
             # 跳转到目标笔记
             st.session_state.selected_memo_id = memo.id
             st.session_state.current_view = 'detail'
-            # 清除URL参数并刷新
             st.query_params.clear()
             st.rerun()
+
+
+def handle_path_navigation():
+    """
+    处理 /memo/uuid 格式的路径导航
+
+    使用 JavaScript 检测 URL 并重定向到查询参数格式
+    """
+    js_code = '''
+    <script>
+    // 检查当前 URL 是否是 /memo/uuid 格式
+    var path = window.location.pathname;
+    var match = path.match(/^\\/memo\\/([a-f0-9-]+)$/);
+    if (match) {
+        var uuid = match[1];
+        // 重定向到查询参数格式
+        window.location.href = window.location.origin + '/?goto_uuid=' + uuid;
+    }
+    </script>
+    '''
+    components.html(js_code, height=0)
 
 
 def main():
     """主函数"""
     init_session_state()
+    handle_path_navigation()  # 处理 /memo/uuid 路径格式
     check_url_navigation()  # 检测URL跳转参数
 
     # 页面顶部锚点

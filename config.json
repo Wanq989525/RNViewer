@@ -1,5 +1,5 @@
 {
-  "db_path": "C:/Users/ZYAT/Downloads/reminds.db",
+  "db_path": "C:/Users/ZYAT/AppData/Roaming/reminds/reminds.db",
   "export_path": "docs",
   "llm": {
     "base_url": "",
