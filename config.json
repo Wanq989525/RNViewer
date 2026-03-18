@@ -1,0 +1,9 @@
+{
+  "db_path": "C:/Users/ZYAT/Downloads/reminds.db",
+  "export_path": "docs",
+  "llm": {
+    "base_url": "",
+    "api_key": "",
+    "model_name": "gpt-4o-mini"
+  }
+}
